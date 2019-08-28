@@ -11,7 +11,7 @@ Code Tracing：C in four function (c4) Compiler
 
 c4 Compiler 不僅是個 C self-host compiler，它也啟發了許多人去撰寫自己的 Compiler，甚至是個了解 Compiler 很好的入門磚。關於如何 From Source code to Binary，你將會有著具體的實作方法的脈絡，會輔助我們去了解更多編譯器相關的理論，以及為何要學習數學。讓我們用欣賞程式碼的角度，來把玩一下 c4，這也將是我們之後自幹編譯器的基礎。
 
-## Source Code：
+## Source Code
 [c4](https://github.com/rswier/c4)
 
 ## 網友註解
@@ -37,6 +37,7 @@ c4 Compiler 不僅是個 C self-host compiler，它也啟發了許多人去撰�
 
 ## 延伸閱讀
 * Tiny C Compiler (TCC)：https://bellard.org/tcc/
+* Human Resource Machine - Tomorrow Corporation：https://tomorrowcorporation.com/humanresourcemachine
 
 ## c4 特色
 * Self-Host Compiler.
@@ -69,7 +70,7 @@ enum {
 * 為何 enum 是從 128 開始的呢？
 主要是因為 [ASCII Code ](https://zh.wikipedia.org/wiki/ASCII) 定義的範圍是 0~127 共 128 字元，所以我們自訂的 token number 必須從 128 開始編號。
 
-### Opcodes
+### Virtual Machine (Opcode)
 
 ```clike=37
 // opcodes
@@ -84,6 +85,8 @@ Generally, LDR is used to load something from ==memory== into a ==register==, an
 * a：register 暫存器。
 * bp：概念跟 rbp(32 bits)/ebp(64 bits) 相同。
 * pc：program counter，指向當前指令。
+
+![](https://i.imgur.com/pcp5DfL.png)
 
 Opcode         | Fully Name  | Description
 :-:|:-:|:-:|
@@ -102,7 +105,7 @@ SI | Store INT | 將暫存器 a 取值，存入 stack frame sp 所指的位址�
 SC | Store CHAR | 將暫存器 a 取值，存入 stack frame sp 所指的位址，然後 sp++，最後再存入暫存器 a
 PSH | Push into Stack Frame | 將暫存器 a 的值 push into Stack Frame
 OR-MODE | Arithmetic operation | pop from Stack Frame and calculate with register value, and then restore into regrister.
-OPEN-MEMCMP | System Call | 使用 Stack Frame sp 當作參數傳遞
+OPEN-MEMCMP | System Call | 使用 Stack Frame sp 當作參數傳遞，並且 pop Stack
 EXIT | exit program | 利用 Stack Frame sp 當作回傳值
 
 ### Symbol Table
@@ -149,7 +152,7 @@ id = sym;
 while (tk = *p) {
 ```
 
-### Lexical Analyzer：next()
+### next() : Lexical Analyzer
 順著 code flow，接下來我們來深入分析 c4 是如何 parsing tokens。
 
 ```clike=48
@@ -285,7 +288,7 @@ Operator 的部分會轉成 token enum value，其他符號的部分就直接依
 
 關於 c4 Lexical Analyzer 的程式碼分析就告一段落了，經過 `next()` 後就完成 token parser，並且取得 token enum value(`tk`)(and`ival` if need)。
 
-### Syntax Analyzer + Semantic Analyzer + CodeGen：expr(), stmt()
+### expr(), stmt() : Syntax Analyzer + Semantic Analyzer + CodeGen
 
 #### Background
 * Syntax Analyzer (Parser)
@@ -413,6 +416,7 @@ else {
 ```
 Local Variable 的部分利用 LEA 將 local variable load 到 register 中，位址是相對位址。Global Variable 放在 data section，value 紀錄的是 data 的位址。最後根據 type 來決定 LC or LI。
 
+##### 括號處理
 ```clike=174
 else if (tk == '(') {
     next();
@@ -429,7 +433,9 @@ else if (tk == '(') {
     }
 }
 ```
-第一個 `if` 處理 type casting，`else` 則是處理括號的優先權。
+第一個 `if` 處理 type casting，`else` 則是處理括號的優先權。 
+
+##### dereference/address-of
 
 ```clike=188
 else if (tk == Mul) {
@@ -444,4 +450,275 @@ else if (tk == And) {
 }
 ```
 recursive-descent call `expr()`，然後 check type 是否為一階 pointer type (semantic analyzer)，dereference semantic analyze 的過程為 `ty=ty-PTR`。
+
+address-of 的部分直接把 LI/LC command 砍掉，register 所存的就會是位址；相較於 derefernece 而言，register 存的是真正的值。
+
+##### Unary Operation
+
+```clike=198
+else if (tk == '!') { next(); expr(Inc); *++e = PSH; *++e = IMM; *++e = 0; *++e = EQ; ty = INT; }
+else if (tk == '~') { next(); expr(Inc); *++e = PSH; *++e = IMM; *++e = -1; *++e = XOR; ty = INT; }
+```
+`expr()` 回傳的值會存在 register，因此這邊要產生的 IR 要先把結果 Push 回 stack，然後再設定 register value，最後做運算，結果會 restore into register。
+
+```clike=200
+else if (tk == Add) { next(); expr(Inc); ty = INT; }
+else if (tk == Sub) {
+    next(); *++e = IMM;
+    if (tk == Num) { *++e = -ival; next(); } else { *++e = -1; *++e = PSH; expr(Inc); *++e = MUL; }
+    ty = INT;
+}
+```
+處理 expr 開頭是 +/- 的 case。
+
+```clike=206
+else if (tk == Inc || tk == Dec) {
+    t = tk; next(); expr(Inc);
+    if (*e == LC) { *e = PSH; *++e = LC; }
+    else if (*e == LI) { *e = PSH; *++e = LI; }
+    else { printf("%d: bad lvalue in pre-increment\n", line); exit(-1); }
+    *++e = PSH;
+    *++e = IMM; *++e = (ty > PTR) ? sizeof(int) : sizeof(char);
+    *++e = (t == Inc) ? ADD : SUB;
+    *++e = (ty == CHAR) ? SC : SI;
+}
+```
+pre-increment/pre-decrement：透過插入 Push command 將 register 的值存入 stack 中。
+
+`expr()` 第一部分處理的都是 expression 開頭的部分，接著第二部分將會展示如何使用 operator-precedence 處理 operator 優先權。
+
+##### Assign
+
+```clike=220
+if (tk == Assign) {
+    next();
+    if (*e == LC || *e == LI) *e = PSH; else { printf("%d: bad lvalue in assignment\n", line); exit(-1); }
+    expr(Assign); *++e = ((ty = t) == CHAR) ? SC : SI;
+}
+```
+將暫存器的位址 push 到 stack 中，做完後面的運算後，結果通常都會在暫存器中，因此透過 SC/SI 將暫存器的值存到 stack 中的位址。
+
+```clike=225
+else if (tk == Cond) {
+  next();
+  *++e = BZ; d = ++e;
+  expr(Assign);
+  if (tk == ':') next(); else { printf("%d: conditional missing colon\n", line); exit(-1); }
+  *d = (int)(e + 3); *++e = JMP; d = ++e;
+  expr(Cond);
+  *d = (int)(e + 1);
+}
+```
+處理類似 `x=y?a:b` 判斷式，保留 BZ 指令後面要填位址的空間，然後進行 recursive descent parser for expression，然後塞入 JMP 指令，且一樣保留後面要填位址的空間，展開最後的 expression 後，再填入要 JMP 的位址。
+
+```clike=234
+else if (tk == Lor) { next(); *++e = BNZ; d = ++e; expr(Lan); *d = (int)(e + 1); ty = INT; }
+else if (tk == Lan) { next(); *++e = BZ;  d = ++e; expr(Or);  *d = (int)(e + 1); ty = INT; }
+```
+通常牽扯到 Branch/Jump 指令的都會使用類似這種方法：先保留目標位址，等待後面的指令都確定後，才會知道目標位址。
+
+```clike=236
+else if (tk == Or)  { next(); *++e = PSH; expr(Xor); *++e = OR;  ty = INT; }
+else if (tk == Xor) { next(); *++e = PSH; expr(And); *++e = XOR; ty = INT; }
+else if (tk == And) { next(); *++e = PSH; expr(Eq);  *++e = AND; ty = INT; }
+else if (tk == Eq)  { next(); *++e = PSH; expr(Lt);  *++e = EQ;  ty = INT; }
+else if (tk == Ne)  { next(); *++e = PSH; expr(Lt);  *++e = NE;  ty = INT; }
+else if (tk == Lt)  { next(); *++e = PSH; expr(Shl); *++e = LT;  ty = INT; }
+else if (tk == Gt)  { next(); *++e = PSH; expr(Shl); *++e = GT;  ty = INT; }
+else if (tk == Le)  { next(); *++e = PSH; expr(Shl); *++e = LE;  ty = INT; }
+else if (tk == Ge)  { next(); *++e = PSH; expr(Shl); *++e = GE;  ty = INT; }
+else if (tk == Shl) { next(); *++e = PSH; expr(Add); *++e = SHL; ty = INT; }
+else if (tk == Shr) { next(); *++e = PSH; expr(Add); *++e = SHR; ty = INT; }
+```
+這邊運算子的概念就是先將數值 push into stack frame，然後利用 operator-precedence 展開後面的 expression，展開的結果通常會存在 register，運算相關的 command 通常是拿 register 和 stack 做運算，然後將結果存回 register。
+
+```clike=247
+else if (tk == Add) {
+  next(); *++e = PSH; expr(Mul);
+  if ((ty = t) > PTR) { *++e = PSH; *++e = IMM; *++e = sizeof(int); *++e = MUL;  }
+  *++e = ADD;
+}
+```
+這邊同時處理 pointer 的加法：因為一次 add 一個「單位」。
+```clike=
+int *a;
+c=a+b;
+```
+接下來來看 SUB：
+```clike=252
+else if (tk == Sub) {
+  next(); *++e = PSH; expr(Mul);
+  if (t > PTR && t == ty) { *++e = SUB; *++e = PSH; *++e = IMM; *++e = sizeof(int); *++e = DIV; ty = INT; }
+  else if ((ty = t) > PTR) { *++e = PSH; *++e = IMM; *++e = sizeof(int); *++e = MUL; *++e = SUB; }
+  else *++e = SUB;
+}
+```
+發現多了一個 `if` 判斷式，這是在處理指標相減計算中間的個數。
+
+```clike=261
+else if (tk == Inc || tk == Dec) {
+  if (*e == LC) { *e = PSH; *++e = LC; }
+  else if (*e == LI) { *e = PSH; *++e = LI; }
+  else { printf("%d: bad lvalue in post-increment\n", line); exit(-1); }
+  *++e = PSH; *++e = IMM; *++e = (ty > PTR) ? sizeof(int) : sizeof(char);
+  *++e = (tk == Inc) ? ADD : SUB;
+  *++e = (ty == CHAR) ? SC : SI;
+  *++e = PSH; *++e = IMM; *++e = (ty > PTR) ? sizeof(int) : sizeof(char);
+  *++e = (tk == Inc) ? SUB : ADD;
+  next();
+}
+```
+post-increment 的做法就是先改變 variable 在 stack 中的值，然後再回復成原來的值，並且存在 register 中，最後再進行運算。
+
+```clike=272
+else if (tk == Brak) {
+  next(); *++e = PSH; expr(Assign);
+  if (tk == ']') next(); else { printf("%d: close bracket expected\n", line); exit(-1); }
+  if (t > PTR) { *++e = PSH; *++e = IMM; *++e = sizeof(int); *++e = MUL;  }
+  else if (t < PTR) { printf("%d: pointer type expected\n", line); exit(-1); }
+  *++e = ADD;
+  *++e = ((ty = t - PTR) == CHAR) ? LC : LI;
+}
+```
+這部分是處理 array index 的取值到 register 中，中間必須處理一個 array 單位乘以 index，以計算最終位址。
+
+#### stmt()
+
+利用 recursive-descent 處理 "if-else", "while", "return", "{}", ";"。這部分的 source code 非常直觀，所以就不做贅述了。
+
+### main() : declaration
+`main()` 的上半部前面已經討論過了，接下來研究下半部，while-loop 的內部。
+
+```clike=372
+bt = INT; // basetype
+if (tk == Int) next();
+else if (tk == Char) { next(); bt = CHAR; }
+else if (tk == Enum) {
+  next();
+  if (tk != '{') next();
+  if (tk == '{') {
+    next();
+    i = 0;
+    while (tk != '}') {
+      if (tk != Id) { printf("%d: bad enum identifier %d\n", line, tk); return -1; }
+      next();
+      if (tk == Assign) {
+        next();
+        if (tk != Num) { printf("%d: bad enum initializer\n", line); return -1; }
+        i = ival;
+        next();
+      }
+      id[Class] = Num; id[Type] = INT; id[Val] = i++;
+      if (tk == ',') next();
+    }
+    next();
+  }
+}
+```
+前面兩個 `if` 分別處理 INT and CHAR，最後一個 `if` 處理 enum：使用 local variable `i` 來處理 value of enum id。
+
+```clike=396
+while (tk != ';' && tk != '}') {
+```
+處理 Global variables and Functions。
+
+```clike=399
+if (tk != Id) { printf("%d: bad global declaration\n", line); return -1; }
+if (id[Class]) { printf("%d: duplicate global definition\n", line); return -1; }
+```
+check 是否有重複宣告，是屬於 semantic analyzer 的一部份。
+
+```clike=403
+  if (tk == '(') { // function
+```
+這邊開始處理 Function declaration。
+
+```clike=404
+id[Class] = Fun;
+id[Val] = (int)(e + 1);
+```
+Symbol table 的 class 設定為 Fun 類型，然後將 value 設定為 IR command 的 下個指令(Function 第一個指令)的位址。
+
+```clike=407
+while (tk != ')') {
+  ty = INT;
+  if (tk == Int) next();
+  else if (tk == Char) { next(); ty = CHAR; }
+  while (tk == Mul) { next(); ty = ty + PTR; }
+  if (tk != Id) { printf("%d: bad parameter declaration\n", line); return -1; }
+  if (id[Class] == Loc) { printf("%d: duplicate parameter definition\n", line); return -1; }
+  id[HClass] = id[Class]; id[Class] = Loc;
+  id[HType]  = id[Type];  id[Type] = ty;
+  id[HVal]   = id[Val];   id[Val] = i++;
+  next();
+  if (tk == ',') next();
+}
+```
+這邊會檢查是否重複宣告 parameter。然後將 Symbol table 的資訊 (Class, type, Val) 備份到 HClass, HType, HVal，這邊是實作在 function 內部更改 local variable's value 將不會影響到 Function 以外的 scope，parameter 也算是 Function local variables。
+
+```clike=422
+loc = ++i;
+```
+紀錄 local variable 開始的 order，前面的 order 是 parameter 個數。
+
+```clike=424
+while (tk == Int || tk == Char) {
+  bt = (tk == Int) ? INT : CHAR;
+  next();
+  while (tk != ';') {
+    ty = bt;
+    while (tk == Mul) { next(); ty = ty + PTR; }
+    if (tk != Id) { printf("%d: bad local declaration\n", line); return -1; }
+    if (id[Class] == Loc) { printf("%d: duplicate local definition\n", line); return -1; }
+    id[HClass] = id[Class]; id[Class] = Loc;
+    id[HType]  = id[Type];  id[Type] = ty;
+    id[HVal]   = id[Val];   id[Val] = ++i;
+    next();
+    if (tk == ',') next();
+  }
+  next();
+}
+```
+處理 Function Local Variables declaration，一樣會備份 Symbol table 資訊。
+
+```clike=440
+*++e = ENT; *++e = i - loc;
+while (tk != '}') stmt();
+*++e = LEV;
+```
+處理 Function 內部的 statement，直到遇到屬於 function 的 `}`。`i-loc` 代表 local variables 的個數。
+
+```clike=443
+id = sym; // unwind symbol table locals
+while (id[Tk]) {
+  if (id[Class] == Loc) {
+    id[Class] = id[HClass];
+    id[Type] = id[HType];
+    id[Val] = id[HVal];
+  }
+  id = id + Idsz;
+}
+```
+回復所有 local variable 的 symbol table 資訊。
+
+```clike=453
+else {
+    id[Class] = Glo;
+    id[Val] = (int)data;
+    data = data + sizeof(int);
+}
+```
+處理 global declaration，symbol table 的 value 存的是 data section 的位址。
+
+```clike=463
+if (!(pc = (int *)idmain[Val])) { printf("main() not defined\n"); return -1; }
+if (src) return 0;
+```
+最後檢查 `main()` function 是否有 define，以及是否要 run IR command on VM。
+
+## Conclusion
+
+c4 compiler 是個很好理解編譯器實作的入門磚，但還是會建議先把理論基礎建立起來，包含 compilation, assembly, linker, loader, stack frame, function call。這些理論剛開始讀來會相當生硬，但是透過理解 c4 compiler，將會對這些理論有更深刻的認知。
+
+我們盡量 trace 每個細節，但難免有些遺漏之處或是理解錯誤的地方，如有任何建議，請再 Mail [lukyandy3162@gmail.com](mailto:lukyandy3162@gmail.com) 告知我，感謝！
 
